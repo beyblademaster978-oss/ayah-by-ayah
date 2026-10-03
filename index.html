@@ -2031,14 +2031,19 @@ let asr=null;
 self.onmessage=async e=>{
   const m=e.data;
   if(m.type==='load'){
-    try{
-      asr=await pipeline('automatic-speech-recognition','${AI_MODEL}',{
-        device:'wasm',
-        dtype:{encoder_model:'q8',decoder_model_merged:'q4'},
-        progress_callback:p=>{if(p&&p.status==='progress')self.postMessage({type:'progress',file:p.file,loaded:p.loaded||0,total:p.total||0});}
-      });
-      self.postMessage({type:'ready'});
-    }catch(err){self.postMessage({type:'error',msg:String(err&&err.message||err)});}
+    // the 8-bit encoder uses ConvInteger, which the browser runtime lacks; 4-bit keeps the convolutions in float
+    const tries=[{encoder_model:'q4',decoder_model_merged:'q4'},{encoder_model:'fp32',decoder_model_merged:'q4'}];
+    let last='';
+    for(const dtype of tries){
+      try{
+        asr=await pipeline('automatic-speech-recognition','${AI_MODEL}',{
+          device:'wasm',dtype,
+          progress_callback:p=>{if(p&&p.status==='progress')self.postMessage({type:'progress',file:p.file,loaded:p.loaded||0,total:p.total||0});}
+        });
+        self.postMessage({type:'ready',dtype:JSON.stringify(dtype)});return;
+      }catch(err){last=String(err&&err.message||err);self.postMessage({type:'note',msg:'model setting '+JSON.stringify(dtype)+' failed: '+last.slice(0,160)});}
+    }
+    self.postMessage({type:'error',msg:last});
   }else if(m.type==='run'){
     try{
       const t0=performance.now();
@@ -2058,7 +2063,8 @@ function aiLoad(){
   AI.worker.onmessage=e=>{
     const m=e.data;
     if(m.type==='progress'){AI.files[m.file]=[m.loaded,m.total];let l=0,t=0;Object.values(AI.files).forEach(v=>{l+=v[0];t+=v[1];});AI.pct=t?Math.round(100*l/t):0;AI.mb=Math.round(l/1e6);const el=$('#aistat');if(el)el.textContent=aiStatusText();}
-    else if(m.type==='ready'){AI.state='ready';hzLog('Quran model ready');paintHzCtl();if(AI.startAfter){AI.startAfter=false;hzListenAI();}}
+    else if(m.type==='note'){hzLog(m.msg);}
+    else if(m.type==='ready'){AI.state='ready';hzLog('Quran model ready '+(m.dtype||''));paintHzCtl();if(AI.startAfter){AI.startAfter=false;hzListenAI();}}
     else if(m.type==='error'){AI.state='error';AI.err='The Quran model could not load: '+m.msg;hzLog(AI.err);paintHzCtl();}
     else if(m.type==='result'){
       AI.busy=false;
@@ -2075,7 +2081,7 @@ function aiStatusText(){
   if(AI.state==='ready')return 'Quran model ready.';
   if(AI.state==='loading')return 'Downloading the Quran model: '+AI.pct+'%'+(AI.mb?' ('+AI.mb+' MB)':'')+'. This happens once; it is saved in the browser afterwards.';
   if(AI.state==='error')return AI.err;
-  return 'The Quran model is about 165 MB and downloads once, then works from the browser’s storage.';
+  return 'The Quran model is about 160 MB and downloads once, then works from the browser’s storage.';
 }
 function aiPump(){
   if(AI.busy||!AI.queue.length||AI.state!=='ready')return;
